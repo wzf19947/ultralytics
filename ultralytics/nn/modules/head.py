@@ -72,7 +72,7 @@ class Detect(nn.Module):
     shape = None
     anchors = torch.empty(0)  # init
     strides = torch.empty(0)  # init
-    legacy = False  # backward compatibility for v3/v5/v8/v9 models
+    legacy = False  # backward compatibility for v3/v5/v8/v9 models  tasks中传入true兼容老模型
     xyxy = False  # xyxy or xywh output
 
     def __init__(self, nc: int = 80, reg_max=16, end2end=False, ch: tuple = ()):
@@ -91,9 +91,11 @@ class Detect(nn.Module):
         self.no = nc + self.reg_max * 4  # number of outputs per anchor
         self.stride = torch.zeros(self.nl)  # strides computed during build
         c2, c3 = max((16, ch[0] // 4, self.reg_max * 4)), max(ch[0], min(self.nc, 100))  # channels
+        #回归头
         self.cv2 = nn.ModuleList(
             nn.Sequential(Conv(x, c2, 3), Conv(c2, c2, 3), nn.Conv2d(c2, 4 * self.reg_max, 1)) for x in ch
         )
+        #分类头，默认深度可分离卷积，或者传统卷积堆叠
         self.cv3 = (
             nn.ModuleList(nn.Sequential(Conv(x, c3, 3), Conv(c3, c3, 3), nn.Conv2d(c3, self.nc, 1)) for x in ch)
             if self.legacy
@@ -126,7 +128,40 @@ class Detect(nn.Module):
     def end2end(self):
         """Checks if the model has one2one for v5/v5/v8/v9/11 backward compatibility."""
         return hasattr(self, "one2one")
+    #推理使用one2one
+    def forward_deploy(
+        self, x: list[torch.Tensor], box_head: torch.nn.Module = None, cls_head: torch.nn.Module = None
+    ) -> dict[str, torch.Tensor]:
+        
+        one2one = [
+            torch.cat((box_head[i](x[i]), cls_head[i](x[i])), 1) for i in range(self.nl)
+        ]
+        return one2one
+        # x = [one2one[i].permute(0,2,3,1) for i in range(self.nl)] #nchw to nhwc for deploy
+        # return x
+    
+    #拆分为box+cls交替的6分支
+    def forward_deploy_split(
+        self, x: list[torch.Tensor], box_head: torch.nn.Module = None, cls_head: torch.nn.Module = None
+    ) -> dict[str, list[torch.Tensor]]:
+        
+        # 初始化返回列表，分别存放不同尺度的 box 和 cls 特征
+        crossed_features = []
 
+        # 遍历每一个检测层 (P3, P4, P5...)
+        for i in range(self.nl):
+            # 1. 拆分计算：独立通过各自的头
+            b_feat = box_head[i](x[i])
+            c_feat = cls_head[i](x[i])
+            
+            # 2. 分别存入列表
+            crossed_features.append(b_feat)
+            crossed_features.append(c_feat)
+
+        # 3. 以字典形式返回拆分后的结果
+        return {
+            "crossed_output": crossed_features
+        }
     def forward_head(
         self, x: list[torch.Tensor], box_head: torch.nn.Module = None, cls_head: torch.nn.Module = None
     ) -> dict[str, torch.Tensor]:
@@ -142,6 +177,12 @@ class Detect(nn.Module):
         self, x: list[torch.Tensor]
     ) -> dict[str, torch.Tensor] | torch.Tensor | tuple[torch.Tensor, dict[str, torch.Tensor]]:
         """Concatenates and returns predicted bounding boxes and class probabilities."""
+        if self.export:
+            x_detach = [xi.detach() for xi in x]
+            return self.forward_deploy(x_detach, **self.one2many if not self.end2end else self.one2one)
+            # return self.forward_deploy(x_detach, **self.one2one)
+            # return self.forward_deploy_split(x_detach, **self.one2one)
+
         preds = self.forward_head(x, **self.one2many)
         if self.end2end:
             x_detach = [xi.detach() for xi in x]
@@ -149,7 +190,9 @@ class Detect(nn.Module):
             preds = {"one2many": preds, "one2one": one2one}
         if self.training:
             return preds
+        #onnx从one2one输出后截断，自行实现后处理
         y = self._inference(preds["one2one"] if self.end2end else preds)
+        #端到端跳过NMS直接输出topk，输出结构为[x,y,w,h, cls_score, cls_id]
         if self.end2end:
             y = self.postprocess(y.permute(0, 2, 1))
         return y if self.export else (y, preds)
@@ -173,7 +216,6 @@ class Detect(nn.Module):
         if self.dynamic or self.shape != shape:
             self.anchors, self.strides = (a.transpose(0, 1) for a in make_anchors(x["feats"], self.stride, 0.5))
             self.shape = shape
-
         dbox = self.decode_bboxes(self.dfl(x["boxes"]), self.anchors.unsqueeze(0)) * self.strides
         return dbox
 
@@ -226,13 +268,17 @@ class Detect(nn.Module):
         Returns:
             (torch.Tensor, torch.Tensor, torch.Tensor): Top scores, class indices, and filtered indices.
         """
-        batch_size, anchors, nc = scores.shape  # i.e. shape(16,8400,84)
+        batch_size, anchors, nc = scores.shape  # i.e. shape(1,8400,84)
         # Use max_det directly during export for TensorRT compatibility (requires k to be constant),
         # otherwise use min(max_det, anchors) for safety with small inputs during Python inference
         k = max_det if self.export else min(max_det, anchors)
+        #对8400个anchor取其80类中的最大类概率，shape[1,8400]--再取topk，shape[1,k]--unsqueeze,shape[1,k,1]
         ori_index = scores.max(dim=-1)[0].topk(k)[1].unsqueeze(-1)
+        #[1,k,1]repeat变为[1,k,80]，从[1,8400,80]中取topk个完整logit
         scores = scores.gather(dim=1, index=ori_index.repeat(1, 1, nc))
+        #展平从k*80个分数中取topk。总体就是先删选topk个最可能anchor，再从该anchor中取topk个最可能class
         scores, index = scores.flatten(1).topk(k)
+        #映射回原位置
         idx = ori_index[torch.arange(batch_size)[..., None], index // nc]  # original index
         return scores[..., None], (index % nc)[..., None].float(), idx
 

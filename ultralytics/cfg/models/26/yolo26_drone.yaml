@@ -6,7 +6,7 @@
 
 # Parameters
 nc: 1 # number of classes
-activation: nn.SiLU()
+activation: nn.LeakyReLU(0.1)
 end2end: True # whether to use end-to-end mode
 reg_max: 1 # DFL bins
 scales: # model compound scaling constants, i.e. 'model=yolo26n.yaml' will call yolo26.yaml with scale 'n'

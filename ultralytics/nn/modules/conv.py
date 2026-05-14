@@ -47,6 +47,7 @@ class Conv(nn.Module):
     """
 
     default_act = nn.SiLU()  # default activation
+    # default_act = nn.LeakyReLU(0.1)  # default activation
 
     def __init__(self, c1, c2, k=1, s=1, p=None, g=1, d=1, act=True):
         """Initialize Conv layer with given parameters.

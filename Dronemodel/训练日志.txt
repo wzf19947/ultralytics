@@ -1,0 +1,13 @@
+yolo11s_20260506:
+300ep, 640, SGD, 2~3min/ep, map 0.983
+
+
+yolo26s_20260506:
+300ep, 640, MuSGD, 6~7min/ep, map 0.984,指标略优于yolo11s，板端推理耗时和cmm也略高于yolo11s,但量化漏检很多，需u16才接近正常
+
+yolo26s_20260508:
+改为500ep，早停
+
+yolo26s_20260509:
+重新训练500ep，scratch，使用SGD，关闭cos_lr, ep300ep map 0.974,  ep500 map 0.983.
+split输出分支与否u8量化依旧漏检，仍需要u16.

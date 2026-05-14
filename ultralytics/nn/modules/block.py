@@ -17,6 +17,7 @@ __all__ = (
     "C2",
     "C2PSA",
     "C3",
+    "C3Libra",
     "C3TR",
     "CIB",
     "DFL",
@@ -344,6 +345,20 @@ class C3(nn.Module):
         """Forward pass through the CSP bottleneck with 3 convolutions."""
         return self.cv3(torch.cat((self.m(self.cv1(x)), self.cv2(x)), 1))
 
+class C3Libra(nn.Module):
+    # CSP Bottleneck with 3 convolutions
+    def __init__(self, c1, c2, n=1, shortcut=True, g=1, e=0.5):  # ch_in, ch_out, number, shortcut, groups, expansion
+        super().__init__()
+        c_ = int(c2 * e)  # hidden channels
+        self.cv1 = Conv(c1, c_, 1, 1)
+        self.cv2 = Conv(c1, c_, 1, 1)
+        self.cv12 = Conv(c_, c_, 3, 1)
+        self.cv3 = Conv(2 * c_, c2, 1)  # optional act=FReLU(c2)
+        
+    def forward(self, x):
+        # return self.cv3(self.cv1(x)) + self.cv2(x)
+        return self.cv3(torch.cat((self.cv12(self.cv1(x)), self.cv2(x)), 1))
+    
 
 class C3x(C3):
     """C3 module with cross-convolutions."""
